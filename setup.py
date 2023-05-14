@@ -19,7 +19,7 @@ setup(
     'routed attention'
   ],
   install_requires=[
-    'colt5-attention>=0.7.1',
+    'colt5-attention>=0.7.2',
     'einops>=0.6.1',
     'local-attention>=1.8.6',
     'torch>=1.6',
