@@ -24,3 +24,14 @@ In my opinion, the CoLT5 paper basically demonstrates mixture of attention alrea
     year    = {2022}
 }
 ```
+
+```bibtex
+@article{Wright2015CoordinateDA,
+    title   = {Coordinate descent algorithms},
+    author  = {Stephen J. Wright},
+    journal = {Mathematical Programming},
+    year    = {2015},
+    volume  = {151},
+    pages   = {3-34}
+}
+```
