@@ -147,6 +147,11 @@ class Attention(nn.Module):
 
 # class
 
+def scatter_mean(src, t, index, dim, eps = 1e-5):
+    numer = src.scatter_add(dim, index, t)
+    denom = src.scatter_add(dim, index, torch.ones_like(t))
+    return numer / (denom + eps)
+
 class MixtureOfAttention(nn.Module):
     def __init__(
         self,
