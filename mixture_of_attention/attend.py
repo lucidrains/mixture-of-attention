@@ -44,8 +44,6 @@ class Attend(nn.Module):
         self.attn_dropout = nn.Dropout(dropout)
 
         self.causal = causal
-        self.register_buffer("mask", None, persistent=False)
-
         self.flash = flash
         assert not (flash and version.parse(torch.__version__) < version.parse('2.0.0')), 'in order to use flash attention, you must be using pytorch 2.0 or above'
 
@@ -66,13 +64,8 @@ class Attend(nn.Module):
             print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
             self.cuda_config = EfficientAttentionConfig(False, True, True)
 
-    def get_mask(self, n, device):
-        if exists(self.mask) and self.mask.shape[-1] >= n:
-            return self.mask[:n, :n]
-
-        mask = torch.ones((n, n), device=device, dtype=torch.bool).triu(1)
-        self.register_buffer("mask", mask, persistent=False)
-        return mask
+    def get_mask(self, i, j, device):
+        return torch.ones((i, j), device=device, dtype=torch.bool).triu(j - i + 1)
 
     def flash_attn(self, q, k, v, mask = None):
         _, heads, q_len, _, k_len, is_cuda = *q.shape, k.shape[-2], q.is_cuda
