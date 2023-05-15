@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
-from einops import rearrange, repeat, pack, unpack
+from einops import rearrange, repeat, reduce, pack, unpack
 
 from mixture_of_attention.attend import Attend
 from colt5_attention import CoordinateDescentRouter
@@ -237,20 +237,11 @@ class MixtureOfAttention(nn.Module):
         need_route_queries = num_routed_queries < num_queries
         need_route_key_values = num_routed_key_values < num_key_values
 
-        if need_route_queries:
-            query_indices, query_scores, queries, _ = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
-            query_scores = rearrange(query_scores, 'b g n -> b g n 1')
-        else:
-            queries = x
-            query_scores = 1.
+        query_indices, query_scores, queries, _ = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
+        query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
-        if need_route_key_values:
-            _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
-            key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
-        else:
-            key_values = context
-            key_value_mask = context_mask
-            key_value_scores = 1.
+        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
+        key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
         
         attn_out = self.attn(
             queries,
@@ -261,8 +252,10 @@ class MixtureOfAttention(nn.Module):
 
         attn_out = attn_out * query_scores
 
+        need_route_queries = exists(query_indices)
+
         if not need_route_queries:
-            return attn_out
+            return reduce(attn_out, 'b e n d -> b n d', 'mean')
 
         out = torch.zeros_like(x)
         counts = torch.zeros(x.shape[:-1], device = x.device)
