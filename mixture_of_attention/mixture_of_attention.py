@@ -184,6 +184,8 @@ class MixtureOfAttention(nn.Module):
         self.num_routed_queries = num_routed_queries
         self.num_routed_key_values = num_routed_key_values
 
+        self.null_routed_token = nn.Parameter(torch.randn(1, 1, dim))
+
         self.query_router = CoordinateDescentRouter(
             dim,
             num_routing_tokens = num_experts,
@@ -207,6 +209,10 @@ class MixtureOfAttention(nn.Module):
             dropout = dropout,
             flash = flash_attn
         )
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
 
     def forward(
         self,
@@ -255,16 +261,30 @@ class MixtureOfAttention(nn.Module):
 
         attn_out = attn_out * query_scores
 
-        if need_route_queries:
-            out = torch.zeros_like(x)
+        if not need_route_queries:
+            return attn_out
 
-            query_indices = repeat(query_indices, 'b g n -> b (g n) d', d = x.shape[-1])
-            attn_out = rearrange(attn_out, 'b g n d -> b (g n) d')
+        out = torch.zeros_like(x)
+        counts = torch.zeros(x.shape[:-1], device = x.device)
 
-            numer = out.scatter_add(1, query_indices, attn_out)
-            denom = out.scatter_add(1, query_indices, torch.ones_like(attn_out))
-            out = numer / denom.clamp(min = 1e-5)
-        else:
-            out = attn_out
+        query_indices = rearrange(query_indices, 'b g n -> b (g n)')
+        attn_out = rearrange(attn_out, 'b g n d -> b (g n) d')
+
+        expanded_query_indices = repeat(query_indices, 'b n -> b n d', d = x.shape[-1])
+
+        attn_out_summed = out.scatter_add(1, expanded_query_indices, attn_out)
+
+        counts = counts.scatter_add(1, query_indices, torch.ones(attn_out.shape[:-1], device = self.device))
+        counts = rearrange(counts, '... -> ... 1')
+
+        scatter_meaned = attn_out_summed / counts.clamp(min = 1e-5)
+
+        # for the positions that were not routed, use a learned routing token instead of just 0s
+
+        out = torch.where(
+            counts > 0,
+            scatter_meaned,
+            self.null_routed_token
+        )
 
         return out
