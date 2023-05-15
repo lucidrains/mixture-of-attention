@@ -63,7 +63,10 @@ class Attention(nn.Module):
         self,
         x,
         context = None,
-        mask = None
+        mask = None,
+        queries_scale = None,
+        keys_scale = None,
+        values_scale = None
     ):
         """
         einops
@@ -119,7 +122,22 @@ class Attention(nn.Module):
 
         # split out heads and merge groups into batches
 
-        q, k, v = map(lambda t: rearrange(t, 'b (g h d) n -> (b g) h n d', h = h, g = g), (q, k, v))
+        q, k, v = map(lambda t: rearrange(t, 'b (g h d) n -> b g h n d', h = h, g = g), (q, k, v))
+
+        # give gradients to routed keys / values via normalized scores from the router, if passed in
+
+        if exists(queries_scale):
+            q = q * queries_scale
+
+        if exists(keys_scale):
+            k = k * keys_scale
+
+        if exists(values_scale):
+            v = v * values_scale
+
+        # merge group into batch
+
+        q, k, v = map(lambda t: rearrange(t, 'b g ... -> (b g) ...'), (q, k, v))
 
         # concat null key / values, to protect against a row having all masked out elements and save a lot of headache
 
@@ -145,19 +163,108 @@ class Attention(nn.Module):
 
         return out
 
-# class
-
-def scatter_mean(src, t, index, dim, eps = 1e-5):
-    numer = src.scatter_add(dim, index, t)
-    denom = src.scatter_add(dim, index, torch.ones_like(t))
-    return numer / (denom + eps)
-
 class MixtureOfAttention(nn.Module):
     def __init__(
         self,
-        dim
+        dim,
+        *,
+        num_routed_queries,
+        num_routed_key_values,
+        dim_context = None,
+        num_experts = 2,
+        dim_head = 64,
+        heads = 8,
+        dropout = 0.,
+        use_triton = True,
+        flash_attn = True,
+        **kwargs
     ):
         super().__init__()
+        dim_context = default(dim_context, dim)
+        self.num_routed_queries = num_routed_queries
+        self.num_routed_key_values = num_routed_key_values
 
-    def forward(self, x):
-        return x
+        self.query_router = CoordinateDescentRouter(
+            dim,
+            num_routing_tokens = num_experts,
+            use_triton = use_triton,
+            **kwargs
+        )
+
+        self.key_value_router = CoordinateDescentRouter(
+            dim_context,
+            num_routing_tokens = num_experts,
+            use_triton = use_triton,
+            **kwargs
+        )
+
+        self.attn = Attention(
+            dim = dim,
+            dim_context = dim_context,
+            dim_head = dim_head,
+            heads = heads,
+            groups = num_experts,
+            dropout = dropout,
+            flash = flash_attn
+        )
+
+    def forward(
+        self,
+        x,
+        context = None,
+        mask = None,
+        context_mask = None,
+        num_routed_queries = None,
+        num_routed_key_values = None
+    ):
+        num_routed_queries = default(num_routed_queries, self.num_routed_queries)
+        num_routed_key_values = default(num_routed_key_values, self.num_routed_key_values)
+
+        if not exists(context):
+            # self attention if context and context mask not passed in
+            context = x
+            context_mask = mask
+
+        num_queries = x.shape[-2]
+        num_key_values = context.shape[-2]
+
+        need_route_queries = num_routed_queries < num_queries
+        need_route_key_values = num_routed_key_values < num_key_values
+
+        if need_route_queries:
+            query_indices, query_scores, queries, _ = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
+            query_scores = rearrange(query_scores, 'b g n -> b g n 1')
+        else:
+            queries = x
+            query_scores = 1.
+
+        if need_route_key_values:
+            _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
+            key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
+        else:
+            key_values = context
+            key_value_mask = context_mask
+            key_value_scores = 1.
+        
+        attn_out = self.attn(
+            queries,
+            context = key_values,
+            mask = key_value_mask,
+            values_scale = key_value_scores,
+        )
+
+        attn_out = attn_out * query_scores
+
+        if need_route_queries:
+            out = torch.zeros_like(x)
+
+            query_indices = repeat(query_indices, 'b g n -> b (g n) d', d = x.shape[-1])
+            attn_out = rearrange(attn_out, 'b g n d -> b (g n) d')
+
+            numer = out.scatter_add(1, query_indices, attn_out)
+            denom = out.scatter_add(1, query_indices, torch.ones_like(attn_out))
+            out = numer / denom.clamp(min = 1e-5)
+        else:
+            out = attn_out
+
+        return out

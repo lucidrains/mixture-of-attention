@@ -6,9 +6,42 @@ Learned from researcher friend that this has been tried in Switch Transformers u
 
 In my opinion, the CoLT5 paper basically demonstrates mixture of attention already for 2 experts. This just has to be generalized to greater than 2 experts, and for autoregressive case. Local attention branch would just be a special case of one expert with fixed routing. If I route only half the tokens, that would lead to a savings of 4x. If I can show even ~4 experts being better than 1 attention, that should be a win.
 
+## Install
+
+```bash
+$ pip install mixture-of-attention
+```
+
+## Usage
+
+```python
+import torch
+from mixture_of_attention import MixtureOfAttention
+
+mixture_of_attn = MixtureOfAttention(
+    dim = 512,
+    dim_context = 256,
+    num_routed_queries = 16,
+    num_routed_key_values = 16,
+    num_experts = 2,
+    dim_head = 64,
+    heads = 8
+)
+
+x = torch.randn(1, 1024, 512)
+mask = torch.ones((1, 1024)).bool()
+
+context = torch.randn(1, 512, 256)
+context_mask = torch.ones((1, 512)).bool()
+
+mixture_of_attn(x, context = context, mask = mask) # (1, 1024, 512)
+```
+
 ## Todo
 
 - [ ] try dynamic routing tokens, using projection of masked mean-pooled queries
+- [ ] make it work for autoregressive
+- [ ] allow for local attention to be automatically included, either for grouped attention, or use `LocalMHA` from `local-attention` repository in parallel, weighted properly
 
 ## Citations
 
