@@ -43,9 +43,10 @@ mixture_of_attn(x, context = context, mask = mask) # (1, 1024, 512)
 
 ## Todo
 
+- [x] allow for local attention to be automatically included, either for grouped attention, or use `LocalMHA` from `local-attention` repository in parallel, weighted properly
+
 - [ ] try dynamic routing tokens, using projection of masked mean-pooled queries
 - [ ] make it work for autoregressive
-- [ ] allow for local attention to be automatically included, either for grouped attention, or use `LocalMHA` from `local-attention` repository in parallel, weighted properly
 
 ## Citations
 

@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'mixture-of-attention',
   packages = find_packages(exclude=[]),
-  version = '0.0.8',
+  version = '0.0.9',
   license='MIT',
   description = 'Mixture of Attention',
   author = 'Phil Wang',

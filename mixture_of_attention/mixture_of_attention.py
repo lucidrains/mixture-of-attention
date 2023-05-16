@@ -197,6 +197,8 @@ class MixtureOfAttention(nn.Module):
         num_routed_queries,
         num_routed_key_values,
         dim_context = None,
+        local_attn = False,
+        local_attn_window_size = None,
         num_experts = 2,
         dim_head = 64,
         heads = 8,
@@ -212,6 +214,18 @@ class MixtureOfAttention(nn.Module):
         self.num_routed_key_values = num_routed_key_values
 
         self.null_routed_token = nn.Parameter(torch.randn(1, 1, dim))
+
+        self.local_attn = None
+
+        if local_attn:
+            assert exists(local_attn_window_size)
+            self.local_attn = LocalMHA(
+                dim = dim,
+                dim_head = dim_head,
+                heads = heads,
+                prenorm = prenorm,
+                window_size = local_attn_window_size
+            )
 
         self.query_router = CoordinateDescentRouter(
             dim,
@@ -254,7 +268,11 @@ class MixtureOfAttention(nn.Module):
         num_routed_queries = default(num_routed_queries, self.num_routed_queries)
         num_routed_key_values = default(num_routed_key_values, self.num_routed_key_values)
 
-        if not exists(context):
+        is_cross_attn = exists(context)
+
+        assert not (exists(self.local_attn) and is_cross_attn), 'cannot do cross attention with local attention (only for self attention)'
+
+        if not is_cross_attn:
             # self attention if context and context mask not passed in
             context = x
             context_mask = mask
@@ -277,9 +295,19 @@ class MixtureOfAttention(nn.Module):
 
         attn_out = attn_out * query_scores
 
+        local_out = None
+        if exists(self.local_attn):
+            local_out = self.local_attn(x, mask = mask)
+
         need_route_queries = exists(query_indices)
 
         if not need_route_queries:
+            out = attn_out
+
+            if exists(local_out):
+                local_out = rearrange(local_out, 'b n d -> b 1 n d')
+                out = torch.cat((local_out, out), dim = 1)
+
             out = reduce(attn_out, 'b e n d -> b n d', 'mean')
 
             if exists(mask):
@@ -300,18 +328,25 @@ class MixtureOfAttention(nn.Module):
         counts = counts.scatter_add(1, query_indices, torch.ones(attn_out.shape[:-1], device = self.device))
         counts = rearrange(counts, '... -> ... 1')
 
-        not_routed_mask = counts == 0
+        has_unrouted = not exists(local_out)
 
-        attn_out_summed = attn_out_summed.masked_fill(not_routed_mask, 0.)
-        scatter_meaned = attn_out_summed / counts.clamp(min = 1e-5)
+        if not has_unrouted:
+            counts = counts + 1
+            attn_out_summed = attn_out_summed + local_out
+        else:
+            not_routed_mask = counts == 0
+            attn_out_summed = attn_out_summed.masked_fill(not_routed_mask, 0.)
+
+        out = attn_out_summed / counts.clamp(min = 1e-5)
 
         # for the positions that were not routed, use a learned routing token instead of just 0s
 
-        out = torch.where(
-            not_routed_mask,
-            self.null_routed_token,
-            scatter_meaned,
-        )
+        if has_unrouted:
+            out = torch.where(
+                not_routed_mask,
+                self.null_routed_token,
+                out,
+            )
 
         if exists(mask):
             out = out.masked_fill(~mask[..., None], 0.)
