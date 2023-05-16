@@ -5,6 +5,7 @@ from torch import nn, einsum
 from einops import rearrange, repeat, reduce, pack, unpack
 
 from mixture_of_attention.attend import Attend
+from local_attention import LocalMHA
 from colt5_attention import CoordinateDescentRouter
 
 # helpers
@@ -21,6 +22,18 @@ def pack_one(t, pattern):
 def unpack_one(t, ps, pattern):
     return unpack(t, ps, pattern)[0]
 
+# normalization
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, groups = 1):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.ones(groups, dim, 1))
+
+    def forward(self, x):
+        normed = F.normalize(x, dim = -2)
+        return normed * self.scale * self.gamma
+
 # attention
 
 class Attention(nn.Module):
@@ -34,7 +47,8 @@ class Attention(nn.Module):
         causal = False,
         groups = 1, # defines number of experts
         dropout = 0.,
-        flash = False
+        flash = False,
+        prenorm = False
     ):
         super().__init__()
         self.heads = heads
@@ -42,6 +56,9 @@ class Attention(nn.Module):
 
         dim_inner = dim_head * heads
         dim_context = default(dim_context, dim)
+
+        self.norm = RMSNorm(dim, groups = groups) if prenorm else nn.Identity()
+        self.context_norm = RMSNorm(dim, groups = groups) if prenorm else nn.Identity()
 
         self.attend = Attend(
             dropout = dropout,
@@ -88,7 +105,7 @@ class Attention(nn.Module):
 
         # fold the groups into the feature dimension to be processed in one go by grouped convolutions
 
-        x = rearrange(x, 'b g n d -> b (g d) n')
+        x = rearrange(x, 'b g n d -> b g d n')
 
         # handle context for cross attention
 
@@ -102,7 +119,7 @@ class Attention(nn.Module):
             assert context.ndim == 4
             assert context.shape[1] == g
 
-            context = rearrange(context, 'b g n d -> b (g d) n')
+            context = rearrange(context, 'b g n d -> b g d n')
 
         context = default(context, x)
 
@@ -115,6 +132,15 @@ class Attention(nn.Module):
                 mask = rearrange(mask, 'b g n -> (b g) n')
 
             mask = F.pad(mask, (1, 0), value = True)
+
+        # prenorm if applicable
+
+        x = self.norm(x)
+        context = self.context_norm(context)
+
+        # fold groups into dimension for grouped conv
+
+        x, context = map(lambda t: rearrange(t, 'b g d n -> b (g d) n'), (x, context))
 
         # queries, keys, values
 
@@ -177,6 +203,7 @@ class MixtureOfAttention(nn.Module):
         dropout = 0.,
         use_triton = True,
         flash_attn = True,
+        prenorm = True,
         **kwargs
     ):
         super().__init__()
@@ -207,7 +234,8 @@ class MixtureOfAttention(nn.Module):
             heads = heads,
             groups = num_experts,
             dropout = dropout,
-            flash = flash_attn
+            flash = flash_attn,
+            prenorm = prenorm
         )
 
     @property
