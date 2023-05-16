@@ -234,9 +234,6 @@ class MixtureOfAttention(nn.Module):
         num_queries = x.shape[-2]
         num_key_values = context.shape[-2]
 
-        need_route_queries = num_routed_queries < num_queries
-        need_route_key_values = num_routed_key_values < num_key_values
-
         query_indices, query_scores, queries, _ = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
