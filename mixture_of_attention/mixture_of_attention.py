@@ -267,6 +267,7 @@ class MixtureOfAttention(nn.Module):
         counts = counts.scatter_add(1, query_indices, torch.ones(attn_out.shape[:-1], device = self.device))
         counts = rearrange(counts, '... -> ... 1')
 
+        attn_out_summed = attn_out_summed.masked_fill(counts == 0, 0.)
         scatter_meaned = attn_out_summed / counts.clamp(min = 1e-5)
 
         # for the positions that were not routed, use a learned routing token instead of just 0s
