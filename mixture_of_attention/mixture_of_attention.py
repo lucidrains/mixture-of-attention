@@ -213,7 +213,7 @@ class MixtureOfAttention(nn.Module):
         self.num_routed_queries = num_routed_queries
         self.num_routed_key_values = num_routed_key_values
 
-        self.null_routed_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.null_routed_token = nn.Parameter(torch.randn(1, 1, dim)) if not local_attn else None
 
         self.local_attn = None
 
