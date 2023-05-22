@@ -77,3 +77,13 @@ mixture_of_attn(x, context = context, mask = mask) # (1, 1024, 512)
     pages   = {3-34}
 }
 ```
+
+```bibtex
+@article{Schmitzer2016StabilizedSS,
+    title   = {Stabilized Sparse Scaling Algorithms for Entropy Regularized Transport Problems},
+    author  = {Bernhard Schmitzer},
+    journal = {ArXiv},
+    year    = {2016},
+    volume  = {abs/1610.06519}
+}
+```

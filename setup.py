@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
   name = 'mixture-of-attention',
   packages = find_packages(exclude=[]),
-  version = '0.0.10',
+  version = '0.0.11',
   license='MIT',
   description = 'Mixture of Attention',
   author = 'Phil Wang',
@@ -19,7 +19,7 @@ setup(
     'routed attention'
   ],
   install_requires=[
-    'colt5-attention>=0.8.1',
+    'colt5-attention>=0.9.0',
     'einops>=0.6.1',
     'local-attention>=1.8.6',
     'torch>=1.6',
