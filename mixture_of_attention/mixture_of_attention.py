@@ -284,12 +284,12 @@ class MixtureOfAttention(nn.Module):
         num_queries = x.shape[-2]
         num_key_values = context.shape[-2]
 
-        query_indices, query_scores, queries, _ = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
+        query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
         _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
         key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
-        
+
         attn_out = self.attn(
             queries,
             context = key_values,
@@ -328,7 +328,12 @@ class MixtureOfAttention(nn.Module):
 
         attn_out_summed = out.scatter_add(1, expanded_query_indices, attn_out)
 
-        counts = counts.scatter_add(1, query_indices, torch.ones(attn_out.shape[:-1], device = self.device))
+        ones = torch.ones(attn_out.shape[:-1], device = self.device)
+
+        if exists(query_mask):
+            ones = ones * rearrange(query_mask, 'b g n -> b (g n)')
+
+        counts = counts.scatter_add(1, query_indices, ones)
         counts = rearrange(counts, '... -> ... 1')
 
         has_unrouted = not exists(local_out)
