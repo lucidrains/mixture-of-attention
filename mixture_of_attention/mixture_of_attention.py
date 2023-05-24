@@ -83,7 +83,8 @@ class Attention(nn.Module):
         mask = None,
         queries_scale = None,
         keys_scale = None,
-        values_scale = None
+        values_scale = None,
+        output_scale = None,
     ):
         """
         einops
@@ -186,6 +187,9 @@ class Attention(nn.Module):
 
         if one_expert:
             out = rearrange(out, 'b 1 n d -> b n d')
+
+        if exists(output_scale):
+            out = out * output_scale
 
         return out
 
@@ -291,9 +295,8 @@ class MixtureOfAttention(nn.Module):
             context = key_values,
             mask = key_value_mask,
             values_scale = key_value_scores,
+            output_scale = query_scores
         )
-
-        attn_out = attn_out * query_scores
 
         local_out = None
         if exists(self.local_attn):
