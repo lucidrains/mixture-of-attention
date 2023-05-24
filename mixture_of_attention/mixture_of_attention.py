@@ -296,10 +296,10 @@ class MixtureOfAttention(nn.Module):
             context = x
             context_mask = mask
 
-        query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
+        query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries, keep_one_route_dim = True)
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
-        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
+        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
         key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
 
         attn_out = self.attn(
@@ -490,10 +490,11 @@ class MixtureOfAutoregressiveAttention(nn.Module):
 
         # coordinate descent routing
 
-        query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
+        query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries, keep_one_route_dim = True)
+
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
-        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
+        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
         key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
 
         attn_out = self.attn(
