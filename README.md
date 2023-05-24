@@ -10,6 +10,8 @@ In my opinion, the CoLT5 paper basically demonstrates mixture of attention alrea
 
 - <a href="https://stability.ai/">Stability</a> and <a href="https://huggingface.co/">🤗 Huggingface</a> for their generous sponsorships to work on and open source cutting edge artificial intelligence research
 
+- <a href="https://github.com/arogozhnikov/einops">einops</a> for tensor manipulation fun
+
 ## Install
 
 ```bash
@@ -41,12 +43,34 @@ context_mask = torch.ones((1, 512)).bool()
 mixture_of_attn(x, context = context, mask = mask) # (1, 1024, 512)
 ```
 
+Autoregressive flavor
+
+```python
+import torch
+from mixture_of_attention import MixtureOfAutoregressiveAttention
+
+mixture_of_attn = MixtureOfAutoregressiveAttention(
+    dim = 512,
+    local_attn_window_size = 64,       # local attention window size
+    routed_window_size = None,         # will be set to the same as local_attn_window_size if None. ideally less than or equal to local attention window size for full receptive field
+    num_routed_queries = 12,
+    num_routed_key_values = 12,
+    num_experts = 2,
+    dim_head = 64,
+    heads = 8
+)
+
+x = torch.randn(1, 1023, 512)
+
+out = mixture_of_attn(x) # (1, 1023, 512)
+```
+
 ## Todo
 
 - [x] allow for local attention to be automatically included, either for grouped attention, or use `LocalMHA` from `local-attention` repository in parallel, weighted properly
+- [x] make it work for autoregressive
 
 - [ ] try dynamic routing tokens, using projection of masked mean-pooled queries
-- [ ] make it work for autoregressive
 
 ## Citations
 
@@ -85,5 +109,15 @@ mixture_of_attn(x, context = context, mask = mask) # (1, 1024, 512)
     journal = {ArXiv},
     year    = {2016},
     volume  = {abs/1610.06519}
+}
+```
+
+```bibtex
+@inproceedings{rogozhnikov2022einops,
+    title   = {Einops: Clear and Reliable Tensor Manipulations with Einstein-like Notation},
+    author  = {Alex Rogozhnikov},
+    booktitle = {International Conference on Learning Representations},
+    year    = {2022},
+    url     = {https://openreview.net/forum?id=oapKSVM2bcj}
 }
 ```

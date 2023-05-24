@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
@@ -21,6 +23,17 @@ def pack_one(t, pattern):
 
 def unpack_one(t, ps, pattern):
     return unpack(t, ps, pattern)[0]
+
+def pad_to_multiple(tensor, multiple, dim = -1, value = 0):
+    seq_len = tensor.shape[dim]
+    m = seq_len / multiple
+    if m.is_integer():
+        return tensor, seq_len
+
+    remainder = math.ceil(m) * multiple - seq_len
+    pad_offset = (0,) * (-1 - dim) * 2
+    padded_tensor = F.pad(tensor, (*pad_offset, 0, remainder), value = value)
+    return padded_tensor, seq_len
 
 # normalization
 
@@ -193,6 +206,8 @@ class Attention(nn.Module):
 
         return out
 
+# mixture of attention
+
 class MixtureOfAttention(nn.Module):
     def __init__(
         self,
@@ -281,9 +296,6 @@ class MixtureOfAttention(nn.Module):
             context = x
             context_mask = mask
 
-        num_queries = x.shape[-2]
-        num_key_values = context.shape[-2]
-
         query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries)
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
@@ -358,5 +370,192 @@ class MixtureOfAttention(nn.Module):
 
         if exists(mask):
             out = out.masked_fill(~mask[..., None], 0.)
+
+        return out
+
+# mixture of autoregressive attention
+
+class MixtureOfAutoregressiveAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        num_routed_queries,
+        num_routed_key_values,
+        local_attn_window_size,
+        dim_context = None,
+        routed_window_size = None,
+        num_experts = 2,
+        dim_head = 64,
+        heads = 8,
+        dropout = 0.,
+        use_triton = True,
+        flash_attn = True,
+        prenorm = True,
+        **kwargs
+    ):
+        super().__init__()
+        dim_context = default(dim_context, dim)
+
+        self.num_routed_queries = num_routed_queries
+        self.num_routed_key_values = num_routed_key_values
+
+        routed_window_size = default(routed_window_size, local_attn_window_size)
+        self.routed_window_size = routed_window_size
+
+        self.local_attn = LocalMHA(
+            dim = dim,
+            dim_head = dim_head,
+            heads = heads,
+            prenorm = prenorm,
+            causal = True,
+            window_size = local_attn_window_size
+        )
+
+        self.query_router = CoordinateDescentRouter(
+            dim,
+            num_routing_tokens = num_experts,
+            use_triton = use_triton,
+            **kwargs
+        )
+
+        self.key_value_router = CoordinateDescentRouter(
+            dim_context,
+            num_routing_tokens = num_experts,
+            use_triton = use_triton,
+            **kwargs
+        )
+
+        self.attn = Attention(
+            dim = dim,
+            dim_context = dim_context,
+            dim_head = dim_head,
+            heads = heads,
+            groups = num_experts,
+            dropout = dropout,
+            flash = flash_attn,
+            prenorm = prenorm
+        )
+
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
+    def forward(
+        self,
+        x,
+        num_routed_queries = None,
+        num_routed_key_values = None
+    ):
+        b = x.shape[0]
+        w = self.routed_window_size
+        num_windows = math.ceil(x.shape[-2] / w) - 1
+
+        # calculate local attention first
+
+        local_out = self.local_attn(x)
+
+        # early return local attention results if window size is equal or less than the routed window size
+
+        if num_windows == 0:
+            return local_out
+
+        # pad sequence to multiple of routing window size
+
+        mask = torch.ones(x.shape[:-1], device = self.device, dtype = torch.bool)
+
+        x, seq_len = pad_to_multiple(x, w, dim = -2)
+        mask, _    = pad_to_multiple(mask, w, dim = -1, value = False)
+
+        context = x[..., :-w, :]
+        context = repeat(context, 'b n d -> (b nw) n d', nw = num_windows)
+
+        context_mask = torch.ones((num_windows, num_windows), device = self.device, dtype = torch.bool).tril()
+        context_mask = repeat(context_mask, 'n1 n2 -> (b n1) (n2 w)', b = b, w = w)
+
+        # fold queries and mask into windows
+
+        x = rearrange(x, 'b (n w) d -> b n w d', w = w)
+        mask = rearrange(mask, 'b (n w) -> b n w', w = w)
+
+        # omit the first window of queries, as they have nothing to attend to
+
+        x = rearrange(x[:, 1:, ...], 'b n w d -> (b n) w d')
+        mask = rearrange(mask[:, 1:, ...], 'b n w -> (b n) w')
+
+        # get number of queries and key values to route
+
+        num_routed_queries = default(num_routed_queries, self.num_routed_queries)
+        num_routed_key_values = default(num_routed_key_values, self.num_routed_key_values)
+
+        # coordinate descent routing
+
+        query_indices, query_scores, queries, query_mask = self.query_router(x, num_tokens = num_routed_queries)
+        query_scores = rearrange(query_scores, 'b g n -> b g n 1')
+
+        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values)
+        key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
+
+        attn_out = self.attn(
+            queries,
+            context = key_values,
+            mask = key_value_mask,
+            values_scale = key_value_scores,
+            output_scale = query_scores
+        )
+
+        need_route_queries = exists(query_indices)
+
+        if not need_route_queries:
+            out = attn_out
+
+            if exists(local_out):
+                local_out = rearrange(local_out, 'b n d -> b 1 n d')
+                out = torch.cat((local_out, out), dim = 1)
+
+            out = reduce(attn_out, 'b e n d -> b n d', 'mean')
+
+            if exists(mask):
+                out = out.masked_fill(~mask[..., None], 0.)
+
+            return out
+
+        out = torch.zeros_like(x)
+        counts = torch.zeros(x.shape[:-1], device = x.device)
+
+        query_indices = rearrange(query_indices, 'b g n -> b (g n)')
+        attn_out = rearrange(attn_out, 'b g n d -> b (g n) d')
+
+        expanded_query_indices = repeat(query_indices, 'b n -> b n d', d = x.shape[-1])
+
+        attn_out_summed = out.scatter_add(1, expanded_query_indices, attn_out)
+
+        ones = torch.ones(attn_out.shape[:-1], device = self.device)
+
+        if exists(query_mask):
+            ones = ones * rearrange(query_mask, 'b g n -> b (g n)')
+
+        counts = counts.scatter_add(1, query_indices, ones)
+        counts = rearrange(counts, '... -> ... 1')
+
+        # un-window the attention output as well as the routed counts (denominator)
+
+        counts = rearrange(counts, '(b n) w 1 -> b (n w) 1', b = b)
+        attn_out_summed = rearrange(attn_out_summed, '(b n) w d -> b (n w) d', b = b)
+
+        counts = F.pad(counts, (0, 0, w, 0), value = 0)
+        attn_out_summed = F.pad(attn_out_summed, (0, 0, w, 0), value = 0.)
+
+        counts = counts[:, :seq_len]
+        attn_out_summed = attn_out_summed[:, :seq_len]
+
+        # local attention present for each token
+
+        attn_out_summed = attn_out_summed + local_out
+        counts = counts + 1
+
+        # average all routed tokens
+
+        out = attn_out_summed / counts.clamp(min = 1e-5)
 
         return out
