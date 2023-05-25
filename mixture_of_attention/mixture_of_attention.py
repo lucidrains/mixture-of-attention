@@ -409,6 +409,9 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         self.num_routed_queries = num_routed_queries
         self.num_routed_key_values = num_routed_key_values
 
+        self.num_experts = num_experts
+        self.null_tokens = nn.Parameter(torch.randn(num_experts, dim))
+
         routed_window_size = default(routed_window_size, local_attn_window_size)
 
         self.routed_window_size = routed_window_size
@@ -532,25 +535,41 @@ class MixtureOfAutoregressiveAttention(nn.Module):
 
             return out
 
-        out = torch.zeros_like(x)
-        counts = torch.zeros(x.shape[:-1], device = x.device)
+        out = torch.zeros((x.shape[0], self.num_experts, *x.shape[1:]), device = x.device, dtype = x.dtype)
+        counts = torch.zeros((x.shape[0], self.num_experts, x.shape[-2]), device = x.device)
 
-        query_indices = rearrange(query_indices, 'b g n -> b (g n)')
-        attn_out = rearrange(attn_out, 'b g n d -> b (g n) d')
+        ones = torch.ones(attn_out.shape[:-1], device = self.device)
 
-        expanded_query_indices = repeat(query_indices, 'b n -> b n d', d = x.shape[-1])
+        if exists(query_mask):
+            ones = ones * query_mask
 
-        attn_out_summed = out.scatter_add(1, expanded_query_indices, attn_out)
+        counts = counts.scatter_add(2, query_indices, ones)
+
+        expanded_query_indices = repeat(query_indices, 'b g n -> b g n d', d = x.shape[-1])
+
+        attn_out_summed = out.scatter_add(2, expanded_query_indices, attn_out)
+
+        # for the positions that were not routed, fill with each individual expert null tokens
+
+        fill_null_token = counts == 0 & ~rearrange(mask, 'b n -> b 1 n')
+
+        attn_out_summed = torch.where(
+            rearrange(fill_null_token, '... -> ... 1'),
+            rearrange(self.null_tokens, 'g d -> 1 g 1 d'),
+            attn_out_summed
+        )
 
         # un-window the attention output as well as the routed counts (denominator)
 
-        attn_out_summed = rearrange(attn_out_summed, '(b n) w d -> b (n w) d', b = b)
+        attn_out_summed = rearrange(attn_out_summed, '(b n) g w d -> b g (n w) d', b = b)
 
         attn_out_summed = F.pad(attn_out_summed, (0, 0, w, 0), value = 0.)
 
-        attn_out_summed = attn_out_summed[:, :seq_len]
+        attn_out_summed = attn_out_summed[..., :seq_len, :]
 
         # sum local attended tokens with routed tokens
+
+        attn_out_summed = reduce(attn_out_summed, 'b g n d -> b n d', 'sum')
 
         attn_out_summed = attn_out_summed + local_out
 
@@ -559,27 +578,6 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         if not self.average_routed:
             return attn_out_summed
 
-        # calculate denominator
-
-        out = attn_out_summed
-
-        ones = torch.ones(attn_out.shape[:-1], device = self.device)
-
-        if exists(query_mask):
-            ones = ones * rearrange(query_mask, 'b g n -> b (g n)')
-
-        counts = counts.scatter_add(1, query_indices, ones)
-
-        counts = rearrange(counts, '(b n) w -> b (n w) 1', b = b)
-
-        counts = F.pad(counts, (0, 0, w, 0), value = 0)
-
-        counts = counts[:, :seq_len]
-
-        counts = counts + 1
-
         # average tokens
 
-        out = out / counts.clamp(min = 1e-5)
-
-        return out
+        return attn_out_summed / (self.num_experts + 1)
