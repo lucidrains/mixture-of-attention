@@ -47,7 +47,8 @@ model = Transformer(
     local_attn_window_size = 64,
     num_routed_queries = 32,
     num_routed_key_values = 64,
-    use_triton = False
+    cosine_sim_routing = True,
+    use_triton = True
 )
 
 model = AutoregressiveWrapper(model).cuda()
