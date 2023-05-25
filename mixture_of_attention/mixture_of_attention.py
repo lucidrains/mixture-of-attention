@@ -71,7 +71,7 @@ class Attention(nn.Module):
         dim_context = default(dim_context, dim)
 
         self.norm = RMSNorm(dim, groups = groups) if prenorm else nn.Identity()
-        self.context_norm = RMSNorm(dim, groups = groups) if prenorm else nn.Identity()
+        self.context_norm = RMSNorm(dim_context, groups = groups) if prenorm else nn.Identity()
 
         self.attend = Attend(
             dropout = dropout,
@@ -225,6 +225,7 @@ class MixtureOfAttention(nn.Module):
         use_triton = True,
         flash_attn = True,
         prenorm = True,
+        average_routed = False,
         **kwargs
     ):
         super().__init__()
@@ -233,6 +234,8 @@ class MixtureOfAttention(nn.Module):
         self.num_routed_key_values = num_routed_key_values
 
         self.null_routed_token = nn.Parameter(torch.randn(1, 1, dim)) if not local_attn else None
+
+        self.average_routed = average_routed
 
         self.local_attn = None
 
@@ -357,7 +360,12 @@ class MixtureOfAttention(nn.Module):
             not_routed_mask = counts == 0
             attn_out_summed = attn_out_summed.masked_fill(not_routed_mask, 0.)
 
-        out = attn_out_summed / counts.clamp(min = 1e-5)
+        out = attn_out_summed
+
+        # average if needed
+
+        if self.average_routed:
+            out = out / counts.clamp(min = 1e-5)
 
         # for the positions that were not routed, use a learned routing token instead of just 0s
 
