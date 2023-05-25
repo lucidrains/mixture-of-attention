@@ -392,6 +392,7 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         use_triton = False,
         flash_attn = True,
         prenorm = True,
+        average_routed = False,
         **kwargs
     ):
         super().__init__()
@@ -401,7 +402,9 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         self.num_routed_key_values = num_routed_key_values
 
         routed_window_size = default(routed_window_size, local_attn_window_size)
+
         self.routed_window_size = routed_window_size
+        self.average_routed = average_routed
 
         self.local_attn = LocalMHA(
             dim = dim,
@@ -531,32 +534,44 @@ class MixtureOfAutoregressiveAttention(nn.Module):
 
         attn_out_summed = out.scatter_add(1, expanded_query_indices, attn_out)
 
+        # un-window the attention output as well as the routed counts (denominator)
+
+        attn_out_summed = rearrange(attn_out_summed, '(b n) w d -> b (n w) d', b = b)
+
+        attn_out_summed = F.pad(attn_out_summed, (0, 0, w, 0), value = 0.)
+
+        attn_out_summed = attn_out_summed[:, :seq_len]
+
+        # sum local attended tokens with routed tokens
+
+        attn_out_summed = attn_out_summed + local_out
+
+        # in experiments, seems to perform better without averaging
+
+        if not self.average_routed:
+            return attn_out_summed
+
+        # calculate denominator
+
+        out = attn_out_summed
+
         ones = torch.ones(attn_out.shape[:-1], device = self.device)
 
         if exists(query_mask):
             ones = ones * rearrange(query_mask, 'b g n -> b (g n)')
 
         counts = counts.scatter_add(1, query_indices, ones)
-        counts = rearrange(counts, '... -> ... 1')
 
-        # un-window the attention output as well as the routed counts (denominator)
-
-        counts = rearrange(counts, '(b n) w 1 -> b (n w) 1', b = b)
-        attn_out_summed = rearrange(attn_out_summed, '(b n) w d -> b (n w) d', b = b)
+        counts = rearrange(counts, '(b n) w -> b (n w) 1', b = b)
 
         counts = F.pad(counts, (0, 0, w, 0), value = 0)
-        attn_out_summed = F.pad(attn_out_summed, (0, 0, w, 0), value = 0.)
 
         counts = counts[:, :seq_len]
-        attn_out_summed = attn_out_summed[:, :seq_len]
 
-        # local attention present for each token
-
-        attn_out_summed = attn_out_summed + local_out
         counts = counts + 1
 
-        # average all routed tokens
+        # average tokens
 
-        out = attn_out_summed / counts.clamp(min = 1e-5)
+        out = out / counts.clamp(min = 1e-5)
 
         return out
