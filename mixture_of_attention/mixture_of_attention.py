@@ -423,7 +423,6 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         num_routed_queries,
         num_routed_key_values,
         local_attn_window_size,
-        dim_context = None,
         routed_window_size = None,
         num_experts = 2,
         dim_head = 64,
@@ -436,8 +435,6 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         **kwargs
     ):
         super().__init__()
-        dim_context = default(dim_context, dim)
-
         self.num_routed_queries = num_routed_queries
         self.num_routed_key_values = num_routed_key_values
 
@@ -466,7 +463,7 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         )
 
         self.key_value_router = CoordinateDescentRouter(
-            dim_context,
+            dim,
             num_routing_tokens = num_experts,
             use_triton = use_triton,
             **kwargs
@@ -474,7 +471,6 @@ class MixtureOfAutoregressiveAttention(nn.Module):
 
         self.attn = Attention(
             dim = dim,
-            dim_context = dim_context,
             dim_head = dim_head,
             heads = heads,
             groups = num_experts,
@@ -538,7 +534,6 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         # coordinate descent routing
 
         query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries, keep_one_route_dim = True)
-
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
         kv_indices, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
@@ -557,7 +552,7 @@ class MixtureOfAutoregressiveAttention(nn.Module):
                 rotary_query_indices = repeat(query_indices, '... -> ... d', d = windowed_rotary_emb.shape[-1])
                 q_rotary_emb = windowed_rotary_emb.gather(2, rotary_query_indices)
             else:
-                q_rotary_emb = rotary_emb[:x.shape[-2]]
+                q_rotary_emb = windowed_rotary_emb
 
             k_rotary_emb = rotary_emb[kv_indices] if exists(kv_indices) else rotary_emb[:context.shape[-2]]
 
@@ -577,16 +572,14 @@ class MixtureOfAutoregressiveAttention(nn.Module):
         need_route_queries = exists(query_indices)
 
         if not need_route_queries:
-            out = attn_out
+            out = F.pad(attn_out, (0, 0, w, 0), value = 0.)
+            out = out[:, :, :seq_len]
 
             if exists(local_out):
                 local_out = rearrange(local_out, 'b n d -> b 1 n d')
                 out = torch.cat((local_out, out), dim = 1)
 
-            out = reduce(attn_out, 'b e n d -> b n d', 'mean')
-
-            if exists(mask):
-                out = out.masked_fill(~mask[..., None], 0.)
+            out = reduce(out, 'b e n d -> b n d', 'mean' if self.average_routed else 'sum')
 
             return out
 
