@@ -6,6 +6,13 @@ from einops import rearrange
 
 from mixture_of_attention.mixture_of_attention import MixtureOfAutoregressiveAttention
 
+from mixture_of_attention.rotary_emb import RotaryEmbedding
+
+# helper functions
+
+def exists(val):
+    return val is not None
+
 # classes
 
 class RMSNorm(nn.Module):
@@ -45,12 +52,15 @@ class Transformer(nn.Module):
         dim_head = 64,
         heads = 8,
         ff_mult = 4,
-        use_triton = True
+        use_triton = True,
+        routed_rotary_emb = True
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.pos_emb = nn.Embedding(seq_len, dim)
         self.seq_len = seq_len
+
+        self.rotary_emb = RotaryEmbedding(dim_head) if routed_rotary_emb else None
 
         self.layers = nn.ModuleList([])
 
@@ -84,8 +94,12 @@ class Transformer(nn.Module):
         x = self.token_emb(x)
         x = x + self.pos_emb(torch.arange(x.shape[-2], device = self.device))
 
+        rotary_emb = None
+        if exists(self.rotary_emb):
+            rotary_emb = self.rotary_emb(x.shape[1])
+
         for attn, ff in self.layers:
-            x = attn(x) + x
+            x = attn(x, rotary_emb = rotary_emb) + x
 
             x = ff(x) + x
 

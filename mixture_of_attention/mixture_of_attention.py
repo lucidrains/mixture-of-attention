@@ -2,13 +2,18 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch import nn, einsum
+from torch import Tensor, nn, einsum
 
+from typing import Tuple, Optional
 from einops import rearrange, repeat, reduce, pack, unpack
 
 from mixture_of_attention.attend import Attend
+from mixture_of_attention.rotary_emb import apply_rotary_pos_emb
+
 from local_attention import LocalMHA
+
 from colt5_attention import CoordinateDescentRouter
+
 
 # helpers
 
@@ -98,6 +103,7 @@ class Attention(nn.Module):
         keys_scale = None,
         values_scale = None,
         output_scale = None,
+        rotary_emb: Optional[Tuple[Tensor, Tensor]] = None
     ):
         """
         einops
@@ -163,6 +169,20 @@ class Attention(nn.Module):
         # split out heads and merge groups into batches
 
         q, k, v = map(lambda t: rearrange(t, 'b (g h d) n -> b g h n d', h = h, g = g), (q, k, v))
+
+        # rotary embedding
+
+        if exists(rotary_emb):
+            q_rotary_emb, k_rotary_emb = rotary_emb
+
+            if q_rotary_emb.ndim > 2:
+                q_rotary_emb = rearrange(q_rotary_emb, 'b g n d -> b g 1 n d')
+
+            if k_rotary_emb.ndim > 2:
+                k_rotary_emb = rearrange(k_rotary_emb, 'b g n d -> b g 1 n d')
+
+            q = apply_rotary_pos_emb(q_rotary_emb, q)
+            k = apply_rotary_pos_emb(k_rotary_emb, k)
 
         # give gradients to routed keys / values via normalized scores from the router, if passed in
 
@@ -285,7 +305,8 @@ class MixtureOfAttention(nn.Module):
         mask = None,
         context_mask = None,
         num_routed_queries = None,
-        num_routed_key_values = None
+        num_routed_key_values = None,
+        rotary_emb = None
     ):
         num_routed_queries = default(num_routed_queries, self.num_routed_queries)
         num_routed_key_values = default(num_routed_key_values, self.num_routed_key_values)
@@ -302,11 +323,22 @@ class MixtureOfAttention(nn.Module):
         query_indices, query_scores, queries, query_mask = self.query_router(x, mask = mask, num_tokens = num_routed_queries, keep_one_route_dim = True)
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
-        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
+        kv_indices, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
         key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
+
+        # rotary embeddings
+
+        if exists(rotary_emb):
+            assert not is_cross_attn, 'rotary embedding should not be used for cross attending'
+            q_rotary_emb = rotary_emb[query_indices] if exists(query_indices) else rotary_emb
+            k_rotary_emb = rotary_emb[kv_indices] if exists(kv_indices) else rotary_emb
+            rotary_emb = (q_rotary_emb, k_rotary_emb)
+
+        # attend
 
         attn_out = self.attn(
             queries,
+            rotary_emb = rotary_emb,
             context = key_values,
             mask = key_value_mask,
             values_scale = key_value_scores,
@@ -458,6 +490,7 @@ class MixtureOfAutoregressiveAttention(nn.Module):
     def forward(
         self,
         x,
+        rotary_emb = None,
         num_routed_queries = None,
         num_routed_key_values = None
     ):
@@ -508,11 +541,33 @@ class MixtureOfAutoregressiveAttention(nn.Module):
 
         query_scores = rearrange(query_scores, 'b g n -> b g n 1')
 
-        _, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
+        kv_indices, key_value_scores, key_values, key_value_mask = self.key_value_router(context, mask = context_mask, num_tokens = num_routed_key_values, keep_one_route_dim = True)
         key_value_scores = rearrange(key_value_scores, 'b g n -> b g 1 n 1')
+
+        # rotary embeddings
+
+        if exists(rotary_emb):
+            rotary_emb, _ = pad_to_multiple(rotary_emb, w, dim = -2)
+
+            windowed_rotary_emb = rearrange(rotary_emb, '(n w) d -> n w d', w = w)
+            windowed_rotary_emb = windowed_rotary_emb[1:]
+            windowed_rotary_emb = repeat(windowed_rotary_emb, 'n w d -> (b n) g w d', b = b, g = query_scores.shape[1])
+
+            if exists(query_indices):
+                rotary_query_indices = repeat(query_indices, '... -> ... d', d = windowed_rotary_emb.shape[-1])
+                q_rotary_emb = windowed_rotary_emb.gather(2, rotary_query_indices)
+            else:
+                q_rotary_emb = rotary_emb[:x.shape[-2]]
+
+            k_rotary_emb = rotary_emb[kv_indices] if exists(kv_indices) else rotary_emb[:context.shape[-2]]
+
+            rotary_emb = (q_rotary_emb, k_rotary_emb)
+
+        # attend
 
         attn_out = self.attn(
             queries,
+            rotary_emb = rotary_emb,
             context = key_values,
             mask = key_value_mask,
             values_scale = key_value_scores,
