@@ -71,6 +71,7 @@ out = mixture_of_attn(x) # (1, 1023, 512)
 - [x] make it work for autoregressive
 
 - [ ] try dynamic routing tokens, using projection of masked mean-pooled queries
+- [ ] try out https://arxiv.org/abs/2210.05144
 
 ## Citations
 
